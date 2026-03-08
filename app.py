@@ -3,159 +3,124 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
-import pytz
 
-# --- ARCHITECT CONFIGURATION ---
+# --- THE ARCHITECT'S UNIFORM ENGINE (FINAL VERSION) ---
+# This version targets SPOT GOLD (XAUUSD) instead of Futures
+
 EQUITY = 125000
-KELLY_RISK_FRAC = 0.0938  # 9.4% per request
-QIB_BIAS = 0.42           # Institutional structural bias
-ALPHA = 0.03              # Mean-reversion coefficient
-BETA = 0.018              # Volume impact coefficient
+KELLY_FRAC = 0.0938 
 
-# MOC Edges (90-minute cycles)
-MOC_EDGES = [
-    "00:00", "01:30", "03:00", "04:30", "06:00", "07:30", "09:00", "10:30",
-    "12:00", "13:30", "15:00", "16:30", "18:00", "19:30", "21:00", "22:30"
-]
-
-def get_market_data():
-    # Fetching COMEX Gold Futures (GC=F)
-    # We pull 7 days of 1-hour and 1 day of 5-minute data
-    gold = yf.Ticker("GC=F")
-    df_h = gold.history(period="7d", interval="1h")
-    df_m5 = gold.history(period="2d", interval="5m")
-    
-    if df_h.empty or df_m5.empty:
-        return None
-    
-    # 1. CALCULATE WOFM_mid (Monday 00:00-00:15 GMT)
-    # Find the most recent Monday
-    now = datetime.now(timezone.utc)
-    monday = now - timedelta(days=now.weekday())
-    monday_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Extract the first 15-30 mins of the week from the hourly/5m data
+def get_autonomous_data():
     try:
-        weekly_start_data = df_h[df_h.index >= pd.to_datetime(monday_start).tz_localize('UTC')]
-        wofm_mid = (weekly_start_data['High'].iloc[0] + weekly_start_data['Low'].iloc[0]) / 2
-    except:
-        # Fallback if Monday data isn't in this slice
-        wofm_mid = (df_h['High'].iloc[0] + df_h['Low'].iloc[0]) / 2
-
-    # 2. CALCULATE TDO (True Day Open - 20:00 GMT NY Close)
-    # Look for the candle at 20:00 GMT from the previous day
-    try:
-        tdo_data = df_h.between_time('19:30', '20:30')
-        tdo = tdo_data['Close'].iloc[-1]
-    except:
-        tdo = df_h['Close'].iloc[-24] # Fallback to 24h ago
-
-    # 3. LIVE METRICS
-    current_price = df_m5['Close'].iloc[-1]
-    
-    # ATR(5)
-    high_low = df_m5['High'] - df_m5['Low']
-    atr = high_low.rolling(5).mean().iloc[-1]
-    
-    # VOL% (Current Volume vs 20-period average)
-    avg_vol = df_m5['Volume'].iloc[-21:-1].mean()
-    current_vol = df_m5['Volume'].iloc[-1]
-    vol_pct = (current_vol / avg_vol) * 100 if avg_vol > 0 else 100
-
-    return {
-        "price": current_price,
-        "wofm": wofm_mid,
-        "tdo": tdo,
-        "atr": atr,
-        "vol_pct": vol_pct,
-        "time": now
-    }
-
-def check_moc_edge(now):
-    # Check if we are within +/- 5 minutes of an MOC Edge
-    current_time_str = now.strftime("%H:%M")
-    curr_minutes = now.hour * 60 + now.minute
-    
-    for edge in MOC_EDGES:
-        edge_h, edge_m = map(int, edge.split(":"))
-        edge_minutes = edge_h * 60 + edge_m
-        if abs(curr_minutes - edge_minutes) <= 5:
-            return True, edge
-    return False, None
-
-# --- STREAMLIT UI ---
-st.set_page_config(page_title="Architect Terminal", layout="wide")
-
-st.title("🏛️ XAUUSD ARCHITECT TERMINAL")
-st.markdown("### Law of Time-Price Inertia | Institutional Framework")
-
-if st.button("RUN CALCULATE: GENERATE TRADE SIGNALS"):
-    with st.spinner('Gathering Real-Life Market Data...'):
-        data = get_market_data()
+        # Ticker XAUUSD=X is the Spot Gold price (Matches brokers more closely)
+        gold = yf.Ticker("XAUUSD=X")
         
-        if data:
-            # Step 1: Temporal Context & MOC Edge
-            is_moc, edge_time = check_moc_edge(data['time'])
-            
-            # Step 2: Directional Synthesis
-            # P_direction = (QIB × 0.35) + (sign(TDO - Current) × 0.25) + (MOC_bias × 0.40)
-            tdo_bias = 0.25 if data['price'] > data['tdo'] else -0.25
-            moc_bias_val = 0.72 if is_moc else 0.40
-            
-            p_long = (QIB_BIAS * 0.35) + (tdo_bias) + (moc_bias_val * 0.40)
-            
-            # Normalize to your 48% - 73% probability range
-            final_prob = min(max(p_long * 100, 48), 78)
+        # Pull 7 days of 1-hour data for WOFM and TDO
+        df_h = gold.history(period="7d", interval="1h")
+        # Pull 1 day of 5-minute data for ATR and Vol
+        df_m5 = gold.history(period="1d", interval="5m")
+        
+        if df_h.empty or df_m5.empty:
+            return None
 
-            # Step 3: Risk Sizing (Kelly)
-            risk_amount = EQUITY * KELLY_RISK_FRAC
-            sl_dist = 1.8 * data['atr']
-            # Gold positioning: 1 lot = $100 per $1 move
-            lots = risk_amount / (sl_dist * 100)
-
-            # Step 4: Targets (E_Max)
-            # Gamma based on regime (auto-trending if price far from WOFM)
-            gamma = 1.618 if abs(data['price'] - data['wofm']) > (data['atr'] * 2) else 1.382
-            tp_dist = sl_dist * 2.2 # Per your framework R:2.2
-
-            # --- DISPLAY OUTPUT ---
-            c1, c2, c3 = st.columns(3)
-            c1.metric("CURRENT PRICE", f"${data['price']:.2f}")
-            c2.metric("WOFM MIDPOINT", f"${data['wofm']:.2f}")
-            c3.metric("TDO (20:00 GMT)", f"${data['tdo']:.2f}")
-
-            st.divider()
-
-            # Signal Logic
-            if data['vol_pct'] > 150:
-                st.info(f"🔥 VOLUME SPIKE DETECTED: {data['vol_pct']:.0f}%")
-            
-            if is_moc:
-                st.success(f"⚡ MOC EDGE ACTIVE: {edge_time} GMT")
-            else:
-                st.warning("⚠️ OUTSIDE MOC EDGE: Expect lower predictability (ε_t is higher)")
-
-            # Final Verdict
-            st.subheader("STRATEGIC MANDATE")
-            bias = "LONG" if data['price'] < data['wofm'] else "SHORT"
-            
-            if bias == "LONG":
-                st.write(f"### ACTION: **BUY / LONG**")
-                st.write(f"**ENTRY:** ${data['price']:.2f} (± 0.2 ATR)")
-                st.write(f"**STOP LOSS:** ${(data['price'] - sl_dist):.2f}")
-                st.write(f"**TARGET (E_MAX):** ${(data['price'] + tp_dist):.2f}")
-            else:
-                st.write(f"### ACTION: **SELL / SHORT**")
-                st.write(f"**ENTRY:** ${data['price']:.2f}")
-                st.write(f"**STOP LOSS:** ${(data['price'] + sl_dist):.2f}")
-                st.write(f"**TARGET (E_MAX):** ${(data['price'] - tp_dist):.2f}")
-
-            st.write(f"**POSITION SIZE:** {lots:.2f} Lots")
-            st.write(f"**PROBABILITY OF EDGE:** {final_prob:.1f}%")
-            
-            st.divider()
-            st.write(f"**RISK ADVISORY:** Risking ${risk_amount:,.2f} on $125k capital. Expected Drawdown: -18% to -22%.")
+        # 1. AUTO-WOFM (Monday 00:00 GMT Midpoint)
+        # Identify the start of the current trading week
+        now = datetime.now(timezone.utc)
+        monday_offset = now.weekday()
+        monday_start = (now - timedelta(days=monday_offset)).replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        weekly_slice = df_h[df_h.index >= pd.to_datetime(monday_start).tz_localize('UTC')]
+        if not weekly_slice.empty:
+            wofm_mid = (weekly_slice['High'].iloc[0] + weekly_slice['Low'].iloc[0]) / 2
         else:
-            st.error("Market Offline or API Limit Reached. Try again in 1 minute.")
+            wofm_mid = (df_h['High'].iloc[0] + df_h['Low'].iloc[0]) / 2
 
-st.caption("Terminal Execution Logic: ΔP/Δt = α × (μ - P_t) / σ_t + β × ∇VOL_t + ε_t")
+        # 2. AUTO-TDO (True Day Open - 20:00 GMT Reset)
+        # We find the close of the 20:00 GMT candle from the previous session
+        tdo_slice = df_h.between_time('19:30', '20:30')
+        tdo = tdo_slice['Close'].iloc[-1] if not tdo_slice.empty else df_h['Close'].iloc[-24]
+
+        # 3. LIVE CALCULATIONS
+        current_price = df_m5['Close'].iloc[-1]
+        atr = (df_m5['High'] - df_m5['Low']).rolling(5).mean().iloc[-1]
+        
+        # Volume Imbalance (Beta Factor)
+        avg_vol = df_m5['Volume'].iloc[-20:].mean()
+        curr_vol = df_m5['Volume'].iloc[-1]
+        vol_gradient = curr_vol / avg_vol if avg_vol > 0 else 1.0
+
+        return {
+            "price": current_price,
+            "wofm": wofm_mid,
+            "tdo": tdo,
+            "atr": atr,
+            "vol_gradient": vol_gradient,
+            "time": now
+        }
+    except Exception as e:
+        return None
+
+# --- STREAMLIT INTERFACE ---
+st.set_page_config(page_title="Architect XAUUSD", layout="wide")
+st.title("🏛️ XAUUSD ARCHITECT: QUANT TERMINAL")
+st.caption("Live Spot Gold (XAUUSD) | Institutional Inertia Model")
+
+# OPTIONAL: Broker Offset (To perfectly sync with your specific broker)
+with st.expander("Broker Sync (Optional)"):
+    offset = st.number_input("If your broker price is different, enter the difference here (e.g., -2.50 or +1.20):", value=0.0)
+
+if st.button("CALCULATE TRADE SIGNALS"):
+    data = get_autonomous_data()
+    
+    if data:
+        # Apply offset to match user's broker exactly
+        live_p = data['price'] + offset
+        wofm_p = data['wofm'] + offset
+        tdo_p = data['tdo'] + offset
+        
+        # 4. DIRECTIONAL SYNTHESIS (Part II of request)
+        qib = 0.42
+        tdo_bias = 0.25 if live_p > tdo_p else -0.25
+        
+        # 90-Minute Macro Cycle Check
+        curr_min = data['time'].hour * 60 + data['time'].minute
+        is_moc = any(abs(curr_min - m) <= 5 for m in [0, 90, 180, 270, 360, 450, 540, 630, 720, 810, 900, 990, 1080, 1170, 1260, 1350])
+        moc_bias = 0.75 if is_moc else 0.40
+        
+        p_long = (qib * 0.35) + (tdo_bias * 0.25) + (moc_bias * 0.40)
+        
+        # 5. RISK MANAGEMENT (Kelly)
+        risk_usd = EQUITY * KELLY_FRAC
+        sl_dist = 1.8 * data['atr']
+        lots = risk_usd / (sl_dist * 100)
+
+        # UI DISPLAY
+        col1, col2, col3 = st.columns(3)
+        col1.metric("BROKER PRICE", f"${live_p:.2f}")
+        col2.metric("WOFM CENTER", f"${wofm_p:.2f}")
+        col3.metric("TDO RESET", f"${tdo_p:.2f}")
+
+        st.divider()
+
+        # SIGNAL OUTPUT
+        if is_moc:
+            st.success("⚡ MOC EDGE ACTIVE: Mean-Reversion probability spiked to 73-78%")
+        
+        if p_long > 0.50:
+            st.header("🟢 SIGNAL: LONG (BUY)")
+            st.write(f"**ENTRY:** ${live_p:.2f}")
+            st.write(f"**STOP LOSS:** ${(live_p - sl_dist):.2f}")
+            st.write(f"**TARGET:** ${wofm_p:.2f} (WOFM Midpoint)")
+        else:
+            st.header("🔴 SIGNAL: SHORT (SELL)")
+            st.write(f"**ENTRY:** ${live_p:.2f}")
+            st.write(f"**STOP LOSS:** ${(live_p + sl_dist):.2f}")
+            st.write(f"**TARGET:** ${tdo_p:.2f} (TDO Target)")
+
+        st.info(f"**POSITION SIZE:** {lots:.2f} Lots (Risk: ${risk_usd:,.0f})")
+        st.caption(f"Confidence Score: {p_long:.2f} | Vol Gradient: {data['vol_gradient']:.2f}")
+        
+    else:
+        st.error("Data fetch failed. Markets might be closed or API is syncing.")
+
+st.warning("Note: Free market data has a 15-minute delay. Use the 'Broker Sync' above if the price gap is larger than 1.00.")
